@@ -41,12 +41,66 @@ This separation leads to better results because each agent focuses on what it do
 - **agent-code-reviewer** — Quality gate that validates AI-generated code for hallucinations, context blindness, and project consistency
 - **refactoring-planner** — Analyzes code problems and creates actionable refactoring plans with metrics and risk assessment
 
-## Installation
+## Project Setup (Self-Improving Documentation)
+
+The [`claude-code-project-setup.md`](claude-code-project-setup.md) file is a ready-to-use instruction that configures any project for effective work with Claude Code. It creates a system of files that gives the AI full project context on every launch, auto-updates after each task, and prevents repeated mistakes.
+
+### What It Creates
+
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Main context file — Claude Code reads it automatically on every launch |
+| `.claude/rules/conventions.md` | Code conventions extracted from your actual codebase |
+| `.claude/rules/workflow.md` | Post-task checklist — what to update after every completed task |
+| `.claude/rules/lessons-learned.md` | Error log — auto-filled on mistakes, checked before working on problem areas |
+| `CHANGELOG.md` | Human-readable change log (not a git log replacement) |
+| `PROGRESS.md` | *(optional)* Milestone tracking for larger projects |
+| `plans/` | *(optional)* Design documents and implementation plans |
+
+### How to Use
+
+**Option A — copy the file into your project:**
+
+```bash
+# From inside your target project
+cp path/to/claude-agentic-flow/claude-code-project-setup.md .
+
+# Then launch Claude Code and say:
+# "Follow the instructions in claude-code-project-setup.md"
+```
+
+**Option B — pipe it directly:**
+
+```bash
+claude "$(cat path/to/claude-agentic-flow/claude-code-project-setup.md)"
+```
+
+**Option C — reference it from the conversation:**
+
+```
+Read claude-code-project-setup.md from /path/to/claude-agentic-flow/ and follow its instructions for this project.
+```
+
+Claude will analyze your project (stack, structure, conventions, commands), create all the files filled with real data, validate them, and prompt you to delete the setup file.
+
+### How It Works After Setup
+
+The `workflow.md` rule creates a self-improving loop:
+
+1. **Every task** → Claude updates `CLAUDE.md`, `CHANGELOG.md`, and rules as needed
+2. **Every mistake** → auto-logged in `lessons-learned.md` with cause and prevention rule
+3. **Before working on a component** → Claude checks `lessons-learned.md` for prior issues
+4. **New convention discovered** → added to `conventions.md`, followed in all future tasks
+
+Over time, the project accumulates knowledge that persists across sessions and team members.
+
+---
+
+## Agents Installation
 
 Copy the agent files to your project's `.claude/agents/` directory:
 
 ```bash
-# Create agents directory if it doesn't exist
 mkdir -p .claude/agents
 
 # Copy agents you need
@@ -55,7 +109,7 @@ cp path/to/claude-agentic-flow/frontend/* .claude/agents/
 cp path/to/claude-agentic-flow/shared/* .claude/agents/
 ```
 
-## Usage
+## Agents Usage
 
 ### Option 1: Explicit Instructions
 
