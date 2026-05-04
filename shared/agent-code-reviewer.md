@@ -88,6 +88,9 @@ Check the generated code against:
 - Confirm file paths and configurations are valid
 - For tests: verify test setup and assertions follow project patterns
 
+### Step 5: Validate Test Quality (if tests were written or modified)
+If the change includes new or modified unit tests, recommend invoking the `verify-tests` skill (`/verify-tests`) before approval. Coverage gates miss tests that execute code without asserting its behavior — e.g. `expect(...).not.toThrow()` as the only assertion, `expect.any(Object)` on a parsed payload, absence-only checks where the replacement element should be asserted instead. Mutation testing proves these gaps empirically. Flag suspicious patterns in your review output and note that `/verify-tests` will confirm or refute them.
+
 ## Project-Specific Checks
 
 Adapt your review to the specific project by discovering:
