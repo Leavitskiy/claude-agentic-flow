@@ -114,6 +114,9 @@ Update the relevant file if:
 ### 4. lessons-learned.md
 If an error was made — log it IMMEDIATELY (format is in the file itself).
 
+### 5. Mutation testing (when shipping new production code)
+After tests pass and coverage is green, run the `verify-tests` skill (`/verify-tests`) on the changed source files. Coverage proves a test executed a line; mutation testing proves the test would actually fail on a realistic regression. Surviving mutants indicate test gaps even when coverage is at 100% — fix them by adding concrete assertions, or document them as equivalent before committing. Skip only for prototypes or untested legacy. Methodology: `flows/test-quality-loop.md` in the claude-agentic-flow repo.
+
 ## Before Working on a Component
 Check `lessons-learned.md` — are there records of previous issues with this component?
 
