@@ -35,7 +35,7 @@ Detect the project's ecosystem and the mutation runner to use. Stop and ask the 
 | Marker file(s) found | Ecosystem | Runner | Install command (suggest, don't run) |
 |---|---|---|---|
 | `package.json` + `jest.config.*` / `vitest.config.*` | JS / TS | StrykerJS | `npm i -D @stryker-mutator/core @stryker-mutator/jest-runner` (or `vitest-runner`) |
-| `pyproject.toml` / `setup.py` + `pytest` config | Python | mutmut (2.x) | `pip install 'mutmut<3'` (or `pip install cosmic-ray` for async-heavy code) |
+| `pyproject.toml` / `setup.py` + `pytest` config | Python | mutmut (3.x — recommended) | `pip install 'mutmut>=3.5,<4'` (or `pip install cosmic-ray` for async-heavy code) |
 | `pom.xml` | Java / Maven | PIT | `pitest-maven` plugin in `pom.xml` |
 | `build.gradle(.kts)` | Java / Kotlin / Gradle | PIT | `info.solidsoft.pitest` Gradle plugin |
 | `*.csproj` / `*.sln` | .NET | Stryker.NET | `dotnet tool install -g dotnet-stryker` |
@@ -46,9 +46,13 @@ If the runner is not installed:
 2. Ask whether they want to add it now (with the implications: dev-dependency only, ~minutes per run on changed files).
 3. Wait for confirmation. Do NOT proceed without it.
 
-**mutmut version note:** This skill targets mutmut **2.x** because 3.x removed the `--paths-to-mutate` CLI flag (now config-only) and the `mutmut junitxml` subcommand (replaced by JSON-only `export_cicd_stats`, which has summary counts but no per-mutant detail). On 3.x the diff-scoping and per-survivor analysis would require text-parsing `mutmut results` + per-id `mutmut show` calls. If you need 3.x or async-heavy mutators, fall back to cosmic-ray and adapt Step 3 accordingly.
+**mutmut version note:** Default to mutmut **3.x**. 3.x copies the project to a `./mutants/` sandbox and mutates inside it; production source under `app/` (or wherever `paths_to_mutate` points) is **never modified, even mid-run**. mutmut 2.x mutated source in place with a `.bak` backup and restored at end — if a 2.x run is killed (Ctrl-C, OOM, agent timeout, parent process crash), the repo is left in a half-mutated state and a parallel `pytest`/`git diff`/agent edit during the run sees the mutation. We've seen this break a feature branch in a real flow — the safety win is large.
 
-If the project already has a config file for the runner (`stryker.config.json`; `setup.cfg [mutmut]` or `pyproject.toml [tool.mutmut]`; `<configuration>` block of the `pitest-maven` plugin in `pom.xml`; Stryker.NET's config file — case-sensitive on Linux, typically `stryker-config.json`) — read it. Respect existing exclusions.
+The 3.x trade-off is that scoping moves from `--paths-to-mutate` (a CLI flag) to `paths_to_mutate=...` in `setup.cfg`, and the `junitxml` subcommand is gone. Diff-scoping in 3.x is done by either (a) editing `setup.cfg` for a per-file pass, or (b) running the full repo (~5 min on a typical service codebase) and grep-filtering `mutmut results` post-hoc. Mutant identifiers in 3.x are dotted names — module-level `app.module.x_func__mutmut_N`, class methods `app.module.xǁClassǁmethod__mutmut_N` (the separator is U+01C1, not a regular pipe — quote when passing to shell).
+
+Use mutmut 2.x only if you specifically need CLI-level diff scoping AND can guarantee the run won't be killed mid-flight (e.g. wrapping it in a long-running CI step with no reaper). Don't run 2.x from inside an agent that may be canceled.
+
+If the project already has a config file for the runner (`stryker.config.json`; mutmut 3.x: `setup.cfg [mutmut]`; mutmut 2.x: `setup.cfg [mutmut]` or `pyproject.toml [tool.mutmut]`; `<configuration>` block of the `pitest-maven` plugin in `pom.xml`; Stryker.NET's config file — case-sensitive on Linux, typically `stryker-config.json`) — read it. Respect existing exclusions.
 
 ## Step 2 — Scope to the diff (CRITICAL)
 
@@ -92,16 +96,52 @@ npx stryker run --mutate "<comma-separated-files>" --reporters json,clear-text
 
 Output: `reports/mutation/mutation.json`.
 
-**mutmut 2.x** (Python — see Step 1 note on the version pin):
+**mutmut 3.x** (Python — see Step 1 note on the version):
+
+3.x has no `--paths-to-mutate` flag. Two scoping strategies, pick by diff size:
+
+```bash
+# A. Per-file scoped run (fast iteration on one or two files).
+#    Snapshot the existing config, narrow paths_to_mutate, run, restore.
+cp setup.cfg setup.cfg.bak
+sed -i.tmp "s|^paths_to_mutate=.*$|paths_to_mutate=$(echo $FILES | tr ' ' ',')|" setup.cfg
+rm -f setup.cfg.tmp
+mutmut run --max-children=4
+mv setup.cfg.bak setup.cfg
+
+# B. Full-repo run (when the diff spans many files, or as the periodic baseline).
+#    Filter to the diff in Step 4 instead.
+mutmut run --max-children=4
+```
+
+mutmut copies the project to `./mutants/` (gitignore it) and runs there. Stats persist in `mutants/mutmut-stats.json` so a subsequent run is incremental. There is no `junitxml` subcommand in 3.x — Step 4 parses the text output of `mutmut results`.
+
+Initial setup if `setup.cfg` doesn't exist yet:
+
+```ini
+[mutmut]
+paths_to_mutate=src/  # or app/, wherever your source lives
+tests_dir=
+    tests/unit
+do_not_mutate=
+    src/__init__.py
+    src/main.py
+# DO NOT set mutate_only_covered_lines=True without verifying — it requires
+# pytest to run under coverage, which on some projects breaks import-time
+# checks in modules that interact with native libs (e.g. cryptography's
+# Encoding enum). Tests are typically scoped via tests_dir instead.
+```
+
+**mutmut 2.x** (only if you have a specific reason — see Step 1):
 
 ```bash
 mutmut run --paths-to-mutate "<comma-separated-files>"
 mutmut junitxml > mutmut-results.xml
 ```
 
-Output: `mutmut-results.xml` (JUnit XML). The per-mutant JSON output is unstable across versions; junitxml is the safe choice on 2.x.
+Output: `mutmut-results.xml` (JUnit XML). 2.x mutates source in place; never run inside an agent or anything that may be canceled mid-flight.
 
-Or for cosmic-ray (when mutmut struggles with async / decorators, or if 2.x is no longer installable): write a TOML config with `module-path` set to the common ancestor of the diff, then `cosmic-ray init <config> session.sqlite` → `cosmic-ray exec <config> session.sqlite` → `cr-report --show-output session.sqlite`. cosmic-ray's diff-scoping is config-file-only, so multi-directory diffs require either widening `module-path` (loses scope) or running per-directory.
+Or for cosmic-ray (when mutmut struggles with async / decorators): write a TOML config with `module-path` set to the common ancestor of the diff, then `cosmic-ray init <config> session.sqlite` → `cosmic-ray exec <config> session.sqlite` → `cr-report --show-output session.sqlite`. cosmic-ray's diff-scoping is config-file-only, so multi-directory diffs require either widening `module-path` (loses scope) or running per-directory.
 
 **PIT** (Maven):
 
@@ -142,13 +182,26 @@ The runners emit per-mutant records in slightly different formats — JSON for S
 
 **PIT XML schema** (`mutations.xml`): each `<mutation status="...">` element has children `<sourceFile>`, `<mutatedClass>`, `<mutatedMethod>`, `<lineNumber>`, `<mutator>`, `<description>`, and (for killed mutants) `<killingTest>`. PIT status values are `KILLED`, `SURVIVED`, `NO_COVERAGE`, `TIMED_OUT`, `NON_VIABLE`, `MEMORY_ERROR`, `RUN_ERROR` — case-fold/map to the skill's enum below: `NO_COVERAGE` → `NoCoverage`, `TIMED_OUT` → `Timeout`, `NON_VIABLE`/`MEMORY_ERROR`/`RUN_ERROR` → `RuntimeError`. Project: `location = sourceFile + ':' + lineNumber`, `mutator = <mutator>` text, `originalSource`/`mutatedSource` are not in the XML (PIT reports the mutator name, not the literal diff — synthesize a one-line description from `<description>` for Step 5 reporting).
 
+**mutmut 3.x results format** (no junitxml — parse the text output of `mutmut results`): one line per mutant in the form `    <dotted_name>: <status>`. Module-level functions: `app.module.x_func__mutmut_N`. Class methods: `app.module.xǁClassǁmethod__mutmut_N` — the separator is U+01C1 ALVEOLAR LATERAL CLICK, not a regular pipe; quote when grepping. Status values: `killed`, `survived`, `no tests`, `not checked`, `timeout`, `suspicious`, `skipped`. Status legend (also printed during `mutmut run`):
+
+| Emoji | Status | Skill enum |
+|---|---|---|
+| 🎉 | `killed` | `Killed` |
+| 🙁 | `survived` | `Survived` |
+| 🫥 | `no tests` | `NoCoverage` (unlike 2.x, 3.x reports it directly) |
+| ⏰ | `timeout` | `Timeout` |
+| 🤔 | `suspicious` | `Timeout` (slow but not fatal — review case-by-case) |
+| 🔇 | `skipped` | `RuntimeError` |
+
+To extract the source file + line for a specific survivor: `mutmut show '<full-mutant-name>'` prints a unified diff against the original — the `--- a/<path>` line gives the file. To filter results by a single source file in shell: `mutmut results | grep -E '^\s*app\.services\.consent\..*: (survived|no tests)'` (anchor with `\s*` because `mutmut results` indents each line).
+
 **mutmut 2.x junitxml schema** (verified against mutmut 2.5 `cache.py:create_junitxml_report`): each mutant becomes a `<testcase name="Mutant #<id>" file="<source-path>" line="<n>">`. The file path lives in the `file=` attribute, NOT `classname` — `classname` is unset. Status is encoded by the child element:
 
 - No child element → `Killed` (also matches `UNTESTED` mutants under the default `--untested-policy=ignore`, so `NoCoverage` is invisible by default).
 - `<failure>` child → `Survived` (also `NoCoverage` if invoked with `--untested-policy=failure` — mutmut doesn't disambiguate the two in the XML, so they're indistinguishable downstream).
 - `<error>` child → `Timeout`.
 
-If you need `NoCoverage` as a distinct signal, run mutmut with `--untested-policy=failure` AND cross-reference the project's coverage tool to disambiguate from `Survived`. Otherwise treat absence-of-child as `Killed` and accept that `NoCoverage` is folded into the killed bucket.
+If you need `NoCoverage` as a distinct signal on 2.x, run with `--untested-policy=failure` AND cross-reference the project's coverage tool to disambiguate from `Survived`. Otherwise treat absence-of-child as `Killed` and accept that `NoCoverage` is folded into the killed bucket. (3.x has the distinct `🫥 no tests` status natively — one of the reasons we recommend 3.x.)
 
 **StrykerJS / Stryker.NET JSON schema** is the [Mutation Testing Elements spec](https://github.com/stryker-mutator/mutation-testing-elements) — `files[<path>].mutants[]` with `{id, mutatorName, location: {start: {line, column}}, status, replacement, killedBy}`. Direct shape match — no projection beyond casing.
 
@@ -235,7 +288,8 @@ After the user fixes tests:
 
 1. Re-run with the runner's incremental (result-cache) mode if available:
    - **StrykerJS** — `--incremental`. The cache file defaults to `reports/stryker-incremental.json`; you can override via `--incrementalFile <path>`.
-   - **mutmut** — `mutmut run` (skips already-killed mutants automatically via `.mutmut-cache`). Catch: mutmut fingerprints source only, not test code — if you're iterating on tests to kill survivors, the cache may return stale "already killed" verdicts after a tests-only edit. Use `mutmut run --rerun-all` if results look suspicious.
+   - **mutmut 3.x** — `mutmut run` (skips already-resolved mutants automatically; cache lives in `mutants/mutmut-stats.json`). Same catch as 2.x: mutmut fingerprints source only, not test code — if you're iterating on tests to kill survivors, the cache may return stale "already killed" verdicts after a tests-only edit. Force a clean re-run with `rm -rf mutants/ mutmut-stats.json`.
+   - **mutmut 2.x** — `mutmut run` reads `.mutmut-cache`. The same fingerprint caveat applies; `mutmut run --rerun-all` re-evaluates everything.
    - **PIT** — add `<withHistory>true</withHistory>` inside the `<configuration>` block of the `pitest-maven` plugin in `pom.xml` (this is a config element, not a CLI flag).
    - **Stryker.NET** — `--with-baseline:<committish>` reuses prior results from a baseline saved against that ref. Storage defaults to `StrykerOutput/Baselines/` on disk (or pushes to the Stryker dashboard if the dashboard reporter is enabled — neither is a path you pass on the CLI). Argument format is the same as `--since:<ref>` (mentioned in Step 3) but the semantics differ: `--since` is diff-scoping (partial report on changed mutants only); `--with-baseline` is result-caching (full report, reuses unchanged mutants' prior status). They're separate concerns and can be combined.
 2. Re-validate ONLY the previously surviving mutants. A targeted re-run is seconds, not minutes.
